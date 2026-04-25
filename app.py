@@ -1,71 +1,76 @@
 import streamlit as st
-import pdfplumber
-import openpyxl
 import re
 import io
-import copy
+import openpyxl
+from pdfminer.high_level import extract_text
 
 st.set_page_config(page_title="Invoice Lot Number Enricher", page_icon="📋", layout="wide")
 
 st.title("📋 Invoice Lot Number Enricher")
-st.markdown("Upload a PDF invoice and an Excel file. The app will match items by description and append lot/certificate info to the Excel.")
+st.markdown("Upload a PDF invoice and an Excel file. The app matches items by description and appends lot/certificate info into the Excel Description column.")
 
 TARGET_SHEET = "Edit - Posted Sales Invoice - "
 DESC_COL = "Description"
 
 
-def extract_lot_info_from_pdf(pdf_file):
-    """Extract description -> lot info mapping from PDF."""
+def get_descriptions_from_excel(excel_bytes):
+    wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+    if TARGET_SHEET not in wb.sheetnames:
+        return None, f"Sheet '{TARGET_SHEET}' not found."
+    ws = wb[TARGET_SHEET]
+    header_row = None
+    desc_col_idx = None
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value == DESC_COL:
+                header_row = cell.row
+                desc_col_idx = cell.column
+                break
+        if header_row:
+            break
+    if not desc_col_idx:
+        return None, f"Column '{DESC_COL}' not found."
+    descs = []
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        val = row[desc_col_idx - 1]
+        if val:
+            descs.append(str(val).strip())
+    return descs, None
+
+
+def extract_lot_info(pdf_bytes, descriptions):
+    text = extract_text(io.BytesIO(pdf_bytes)).split("\x0c")[0]
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    br_re = re.compile(r"^Br\. serije:.+")
+    num_re = re.compile(r"^\d{4,5}$")
+
     lot_map = {}
-    text = ""
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            text += page.extract_text() + "\n"
-
-    # Pattern: item line followed by Br. serije lines
-    # Match item lines like: "1. 12067 OLITOR CAPS 10/10MG 720 Kut 1,214.10 10 6 821,702.88"
-    # Then collect subsequent Br. serije lines
-
-    lines = text.split("\n")
-    current_desc = None
-    lot_lines = []
-
-    item_re = re.compile(r"^\d+\.\s+\d+\s+(.+?)\s+[\d,]+\s+Kut\s+[\d,.]+")
-    br_re = re.compile(r"(Br\. serije:.+)")
-
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        m = item_re.match(line)
-        if m:
-            # Save previous
-            if current_desc and lot_lines:
-                lot_map[current_desc] = " | ".join(lot_lines)
-            current_desc = m.group(1).strip()
-            lot_lines = []
-        elif current_desc:
-            bm = br_re.search(line)
-            if bm:
-                lot_lines.append(bm.group(1).strip())
-        i += 1
-
-    # Save last
-    if current_desc and lot_lines:
-        lot_map[current_desc] = " | ".join(lot_lines)
-
+    for desc in descriptions:
+        try:
+            pos = next(i for i, l in enumerate(lines) if l.strip() == desc)
+        except StopIteration:
+            continue
+        lots = []
+        # Collect br lines before description
+        j = pos - 1
+        while j >= 0 and br_re.match(lines[j]):
+            lots.insert(0, lines[j])
+            j -= 1
+        # Collect br lines after description (skip item number if present)
+        k = pos + 1
+        if k < len(lines) and num_re.match(lines[k]):
+            k += 1
+        while k < len(lines) and br_re.match(lines[k]):
+            lots.append(lines[k])
+            k += 1
+        if lots:
+            lot_map[desc] = " | ".join(lots)
     return lot_map
 
 
-def enrich_excel(excel_file, lot_map):
-    """Add lot info to Description column in target sheet."""
-    wb = openpyxl.load_workbook(excel_file)
-
-    if TARGET_SHEET not in wb.sheetnames:
-        return None, f"Sheet '{TARGET_SHEET}' not found. Available: {wb.sheetnames}"
-
+def enrich_excel(excel_bytes, lot_map):
+    wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
     ws = wb[TARGET_SHEET]
-
-    # Find header row and Description column index
     header_row = None
     desc_col_idx = None
     for row in ws.iter_rows():
@@ -77,12 +82,7 @@ def enrich_excel(excel_file, lot_map):
         if header_row:
             break
 
-    if not desc_col_idx:
-        return None, f"Column '{DESC_COL}' not found in sheet."
-
-    matched = []
-    unmatched = []
-
+    matched, unmatched = [], []
     for row in ws.iter_rows(min_row=header_row + 1):
         cell = row[desc_col_idx - 1]
         desc = cell.value
@@ -103,16 +103,23 @@ def enrich_excel(excel_file, lot_map):
 
 
 col1, col2 = st.columns(2)
-
 with col1:
     pdf_file = st.file_uploader("📄 Upload PDF Invoice", type=["pdf"])
-
 with col2:
     excel_file = st.file_uploader("📊 Upload Excel File", type=["xlsx"])
 
 if pdf_file and excel_file:
+    pdf_bytes = pdf_file.read()
+    excel_bytes = excel_file.read()
+
+    with st.spinner("Reading Excel descriptions..."):
+        descriptions, err = get_descriptions_from_excel(excel_bytes)
+    if err:
+        st.error(err)
+        st.stop()
+
     with st.spinner("Extracting lot info from PDF..."):
-        lot_map = extract_lot_info_from_pdf(pdf_file)
+        lot_map = extract_lot_info(pdf_bytes, descriptions)
 
     st.subheader("📦 Lot Info Extracted from PDF")
     if lot_map:
@@ -124,30 +131,25 @@ if pdf_file and excel_file:
 
     if lot_map:
         with st.spinner("Enriching Excel file..."):
-            result = enrich_excel(excel_file, lot_map)
+            out_bytes, matched, unmatched = enrich_excel(excel_bytes, lot_map)
 
-        if result[0] is None:
-            st.error(result[1])
-        else:
-            out_bytes, matched, unmatched = result
+        st.subheader("✅ Results")
+        col3, col4 = st.columns(2)
+        with col3:
+            st.success(f"**{len(matched)} items matched and updated**")
+            for m in matched:
+                st.markdown(f"- {m}")
+        with col4:
+            if unmatched:
+                st.warning(f"**{len(unmatched)} items not matched in PDF**")
+                for u in unmatched:
+                    st.markdown(f"- {u}")
+            else:
+                st.success("All items matched!")
 
-            st.subheader("✅ Results")
-            col3, col4 = st.columns(2)
-            with col3:
-                st.success(f"**{len(matched)} items matched and updated:**")
-                for m in matched:
-                    st.markdown(f"- {m}")
-            with col4:
-                if unmatched:
-                    st.warning(f"**{len(unmatched)} items not matched in PDF:**")
-                    for u in unmatched:
-                        st.markdown(f"- {u}")
-                else:
-                    st.success("All items matched!")
-
-            st.download_button(
-                label="⬇️ Download Enriched Excel",
-                data=out_bytes,
-                file_name=f"enriched_{excel_file.name}",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        st.download_button(
+            label="⬇️ Download Enriched Excel",
+            data=out_bytes,
+            file_name=f"enriched_{excel_file.name}",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
