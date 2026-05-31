@@ -64,8 +64,7 @@ def extract_lot_info(pdf_bytes, descriptions):
             lots.append(lines[k])
             k += 1
         if lots:
-            cleaned = [re.sub(r",?\s*Kolicina:.*$", "", l).rstrip(", ") for l in lots]
-            lot_map[desc] = " | ".join(cleaned)
+            lot_map[desc] = " | ".join(lots)
     return lot_map
 
 
