@@ -39,10 +39,17 @@ def get_descriptions_from_excel(excel_bytes):
 
 
 def extract_lot_info(pdf_bytes, descriptions):
-    text = extract_text(io.BytesIO(pdf_bytes)).split("\x0c")[0]
+    pages = extract_text(io.BytesIO(pdf_bytes)).split("\x0c")
+    # Some exports contain a duplicate copy of the invoice appended after
+    # the totals; stop once we've captured one full copy of the document.
+    kept_pages = []
+    for page in pages:
+        kept_pages.append(page)
+        if "Ukupno RSD sa PDV-om" in page:
+            break
+    text = "\x0c".join(kept_pages)
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     br_re = re.compile(r"^Br\. serije:.+")
-    num_re = re.compile(r"^\d{4,5}$")
 
     lot_map = {}
     for desc in descriptions:
@@ -51,18 +58,12 @@ def extract_lot_info(pdf_bytes, descriptions):
         except StopIteration:
             continue
         lots = []
-        # Collect br lines before description
+        # Collect br lines preceding the description (the PDF layout places
+        # each item's "Br. serije:" lines directly before its description)
         j = pos - 1
         while j >= 0 and br_re.match(lines[j]):
             lots.insert(0, lines[j])
             j -= 1
-        # Collect br lines after description (skip item number if present)
-        k = pos + 1
-        if k < len(lines) and num_re.match(lines[k]):
-            k += 1
-        while k < len(lines) and br_re.match(lines[k]):
-            lots.append(lines[k])
-            k += 1
         if lots:
             lot_map[desc] = " | ".join(lots)
     return lot_map
