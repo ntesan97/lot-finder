@@ -50,6 +50,7 @@ def extract_lot_info(pdf_bytes, descriptions):
     text = "\x0c".join(kept_pages)
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     br_re = re.compile(r"^Br\. serije:.+")
+    num_re = re.compile(r"^\d{4,5}$")
 
     lot_map = {}
     for desc in descriptions:
@@ -58,12 +59,22 @@ def extract_lot_info(pdf_bytes, descriptions):
         except StopIteration:
             continue
         lots = []
-        # Collect br lines preceding the description (the PDF layout places
-        # each item's "Br. serije:" lines directly before its description)
+        # Collect br lines preceding the description (the PDF layout usually
+        # places each item's "Br. serije:" lines directly before its
+        # description)
         j = pos - 1
         while j >= 0 and br_re.match(lines[j]):
             lots.insert(0, lines[j])
             j -= 1
+        # Some items instead have their code and "Br. serije:" lines after
+        # the description (skip the item code number if present)
+        if not lots:
+            k = pos + 1
+            if k < len(lines) and num_re.match(lines[k]):
+                k += 1
+            while k < len(lines) and br_re.match(lines[k]):
+                lots.append(lines[k])
+                k += 1
         if lots:
             lot_map[desc] = " | ".join(lots)
     return lot_map
